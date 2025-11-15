@@ -1,6 +1,22 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 
 const API = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
+
+function useAutoAdvance(enabled, deps, getDelayMs, onTick) {
+  const timerRef = useRef(null)
+  useEffect(() => {
+    if (!enabled) return
+    const delay = getDelayMs()
+    if (!delay || delay <= 0) return
+    timerRef.current && clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => onTick(), delay)
+    return () => {
+      timerRef.current && clearTimeout(timerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps)
+}
 
 function App() {
   const [text, setText] = useState('Once upon a time, Alice walked through a quiet forest. She whispered, "I can do this." A storm gathered, but she found a warm cottage and smiled.')
@@ -10,10 +26,82 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const [playing, setPlaying] = useState(false)
+  const [idx, setIdx] = useState(0)
+
+  const basePerSceneMs = useMemo(() => {
+    if (pacing === 'slow') return 4000
+    if (pacing === 'fast') return 1800
+    return 2800
+  }, [pacing])
+
+  const currentScene = result?.scenes[idx]
+
+  const getTransitionVariants = (t) => {
+    const common = { duration: (currentScene?.transition?.duration || 0.8) }
+    switch (t) {
+      case 'wipe':
+        return {
+          initial: { x: '100%', opacity: 1 },
+          animate: { x: 0, opacity: 1, transition: { ...common } },
+          exit: { x: '-100%', opacity: 1, transition: { ...common } },
+        }
+      case 'pan':
+        return {
+          initial: { scale: 1.1, x: 20, opacity: 0.9 },
+          animate: { scale: 1, x: 0, opacity: 1, transition: { ...common } },
+          exit: { scale: 0.98, x: -15, opacity: 0.9, transition: { ...common } },
+        }
+      case 'dolly':
+        return {
+          initial: { scale: 0.9, opacity: 0 },
+          animate: { scale: 1, opacity: 1, transition: { ...common } },
+          exit: { scale: 1.05, opacity: 0, transition: { ...common } },
+        }
+      case 'fade-through-black':
+        return {
+          initial: { opacity: 0, filter: 'brightness(0)' },
+          animate: { opacity: 1, filter: 'brightness(1)', transition: { ...common } },
+          exit: { opacity: 0, filter: 'brightness(0)', transition: { ...common } },
+        }
+      case 'crossfade':
+      default:
+        return {
+          initial: { opacity: 0 },
+          animate: { opacity: 1, transition: { ...common } },
+          exit: { opacity: 0, transition: { ...common } },
+        }
+    }
+  }
+
+  const getDelayMs = () => {
+    if (!currentScene) return 0
+    const t = (currentScene.transition?.duration || 0.8) * 1000
+    return basePerSceneMs + t
+  }
+
+  useAutoAdvance(playing && !!result, [playing, idx, result, basePerSceneMs], getDelayMs, () => {
+    setIdx((i) => {
+      const next = i + 1
+      if (!result) return 0
+      if (next >= result.scenes.length) {
+        setPlaying(false)
+        return i
+      }
+      return next
+    })
+  })
+
+  const resetPlayer = () => {
+    setIdx(0)
+    setPlaying(false)
+  }
+
   const generate = async () => {
     setLoading(true)
     setError('')
     setResult(null)
+    resetPlayer()
     try {
       const res = await fetch(`${API}/api/animate`, {
         method: 'POST',
@@ -26,6 +114,7 @@ function App() {
       }
       const data = await res.json()
       setResult(data)
+      setIdx(0)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -38,7 +127,7 @@ function App() {
       <div className="max-w-5xl mx-auto space-y-6">
         <header className="text-center">
           <h1 className="text-3xl font-bold text-gray-800">Text → Animated Scene Plan</h1>
-          <p className="text-gray-600">No human narrator will be added unless you ask. This generates a consistent cast, environments, and smooth scene transitions.</p>
+          <p className="text-gray-600">No human narrator will be added unless you ask. Generate a consistent cast, environments, and smooth scene transitions — now with an animated preview.</p>
         </header>
 
         <section className="bg-white rounded-xl shadow p-4 grid md:grid-cols-3 gap-4">
@@ -96,8 +185,62 @@ function App() {
                 <p className="text-sm text-gray-700">{result.style}</p>
               </div>
             </div>
+
+            {/* Animated Preview Player */}
+            <div className="border rounded-lg p-3">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setIdx(i => Math.max(0, i - 1))} className="px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200 text-sm">Prev</button>
+                  {!playing ? (
+                    <button onClick={() => setPlaying(true)} className="px-3 py-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">Play</button>
+                  ) : (
+                    <button onClick={() => setPlaying(false)} className="px-3 py-1.5 bg-amber-500 text-white rounded hover:bg-amber-600 text-sm">Pause</button>
+                  )}
+                  <button onClick={() => setIdx(i => result ? Math.min(result.scenes.length - 1, i + 1) : 0)} className="px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200 text-sm">Next</button>
+                  <button onClick={resetPlayer} className="px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200 text-sm">Reset</button>
+                </div>
+                <div className="text-xs text-gray-500">Scene {idx + 1} / {result.scenes.length} • Auto {playing ? 'On' : 'Off'}</div>
+              </div>
+
+              <div className="relative h-56 sm:h-64 md:h-72 overflow-hidden rounded-md bg-gradient-to-br from-gray-50 to-gray-100 border">
+                <AnimatePresence mode="wait">
+                  {currentScene && (
+                    <motion.div
+                      key={currentScene.id}
+                      className="absolute inset-0 p-4 flex flex-col"
+                      initial={getTransitionVariants(currentScene.transition?.type).initial}
+                      animate={getTransitionVariants(currentScene.transition?.type).animate}
+                      exit={getTransitionVariants(currentScene.transition?.type).exit}
+                    >
+                      <div className="text-xs text-gray-500">{result.environments.find(e => e.id === currentScene.environmentId)?.name} • {currentScene.transition.type}</div>
+                      <div className="mt-1 font-semibold">{currentScene.title}</div>
+                      <div className="mt-2 text-sm text-gray-700 line-clamp-[7]">{currentScene.description}</div>
+                      <div className="mt-auto">
+                        <div className="text-xs text-gray-500">In scene:</div>
+                        <div className="mt-1 grid grid-cols-2 gap-2">
+                          {currentScene.characters.map((ch) => {
+                            const base = result.characters.find(c => c.id === ch.id)
+                            return (
+                              <div key={ch.id} className="rounded-md p-2 border bg-white/80 backdrop-blur">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-medium" style={{color: `hsl(${(base.color*55)%360} 70% 40%)`}}>{base.name}</span>
+                                  {ch.emotion && <span className="text-[10px] italic text-gray-500">{ch.emotion}</span>}
+                                </div>
+                                {ch.dialogue && <div className="text-xs mt-1 border-l-2 border-indigo-400 pl-2 text-gray-700">“{ch.dialogue}”</div>}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+
+            {/* Static Scene List */}
             <div className="space-y-4">
-              {result.scenes.map((s, idx) => (
+              {result.scenes.map((s) => (
                 <div key={s.id} className="border rounded-lg p-3">
                   <div className="flex items-center justify-between">
                     <h4 className="font-semibold">{s.title}</h4>
